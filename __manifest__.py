@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 {
     'name': 'Odoo Dev MCP Server',
-    'version': '1.0.0',
+    'version': '19.0.1.0.0',
     'category': 'Tools',
     'summary': 'MCP Server for Odoo Development and Administration',
     'description': """

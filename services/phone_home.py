@@ -6,6 +6,7 @@ import socket
 from datetime import datetime
 
 import requests
+from odoo import release
 
 _logger = logging.getLogger(__name__)
 
@@ -65,7 +66,7 @@ def register_server(env) -> bool:
 
         # Get server info
         server_port = int(ICP.get_param('mcp.server_port', default=8768))
-        odoo_version = env.registry.version
+        odoo_version = release.version
 
         # Get server ID (use database name + hostname as unique ID)
         server_id = f"{env.cr.dbname}_{network_info['hostname']}"

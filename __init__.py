@@ -12,7 +12,11 @@ _logger = logging.getLogger(__name__)
 
 
 def post_init_hook(env):
-    """Post-installation hook to register server with phone-home endpoint."""
+    """Post-installation hook to register server with phone-home endpoint.
+
+    Args:
+        env: Odoo environment
+    """
     _logger.info("OdooDevMCP: Running post-install hook")
 
     try:

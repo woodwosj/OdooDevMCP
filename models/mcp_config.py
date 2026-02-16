@@ -23,11 +23,6 @@ class MCPConfig(models.TransientModel):
         config_parameter='mcp.server_port',
         help='Port for MCP HTTP server'
     )
-    mcp_api_key = fields.Char(
-        string='API Key',
-        config_parameter='mcp.api_key',
-        help='API key for authenticating MCP client connections (Bearer token)'
-    )
     mcp_log_level = fields.Selection(
         [('debug', 'Debug'), ('info', 'Info'), ('warning', 'Warning'), ('error', 'Error')],
         string='Log Level',

@@ -5,6 +5,7 @@ import json
 import logging
 from typing import Dict, Any, Optional
 
+from odoo import release
 from ..tools.registry import get_tool_registry, get_tool_schemas, call_tool
 
 _logger = logging.getLogger(__name__)
@@ -279,7 +280,7 @@ class MCPServerHandler:
                     'hostname': socket.gethostname(),
                     'os': platform.system() + " " + platform.release(),
                     'python_version': platform.python_version(),
-                    'odoo_version': self.env.registry.version,
+                    'odoo_version': release.version,
                 }
                 content = json.dumps(system_info, indent=2)
                 mime_type = "application/json"

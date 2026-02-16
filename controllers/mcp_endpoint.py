@@ -2,7 +2,7 @@
 
 import json
 import logging
-from odoo import http
+from odoo import http, release
 from odoo.http import request, Response
 from werkzeug.exceptions import BadRequest
 
@@ -58,7 +58,7 @@ class MCPController(http.Controller):
                 json.dumps({
                     'status': 'healthy',
                     'version': '1.0.0',
-                    'odoo_version': request.env.registry.version
+                    'odoo_version': release.version
                 }),
                 content_type='application/json',
                 status=200

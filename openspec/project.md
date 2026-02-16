@@ -28,7 +28,7 @@ On module installation/server start, it phones home to a configured API endpoint
 - Odoo ORM field style: `snake_case` for fields, `PascalCase` for model classes
 - Config parameters namespaced as `mcp.*` (e.g., `mcp.api_key`, `mcp.phone_home_url`)
 - No type annotations on Odoo model methods (ORM doesn't support them well); use them on service/utility code
-- Manifest version: `1.0.0` (simple semver, not Odoo's `19.0.x.x.x` format)
+- Manifest version: `19.0.1.0.0` (Odoo 19 format: major.minor.patch.build.revision)
 
 ### Architecture Patterns
 - **Odoo module structure:** `models/`, `controllers/`, `views/`, `data/`, `security/`, plus custom dirs `tools/`, `services/`
@@ -84,7 +84,6 @@ All stored via `ir.config_parameter`, editable in Settings UI:
 |-----------|---------|-------------|
 | `mcp.server_host` | `127.0.0.1` | Bind address for MCP HTTP server |
 | `mcp.server_port` | `8768` | Port for MCP HTTP server |
-| `mcp.api_key` | *(deprecated)* | Superseded by Odoo's native API key system (`auth='bearer'`) |
 | `mcp.log_level` | `info` | Logging verbosity (debug/info/warning/error) |
 | `mcp.phone_home_url` | *(empty)* | Fleet registry API URL (empty = disabled) |
 | `mcp.heartbeat_interval` | `60` | Heartbeat interval in seconds |
@@ -137,8 +136,9 @@ All stored via `ir.config_parameter`, editable in Settings UI:
 ## File Map
 ```
 odoo_dev_mcp/
-├── __manifest__.py           # Module manifest (v1.0.0, depends: base, web)
+├── __manifest__.py           # Module manifest (v19.0.1.0.0, depends: base, web)
 ├── __init__.py               # Module init + post_init_hook
+├── requirements.txt          # Python dependencies (mcp, pyyaml, pydantic, requests, psycopg2)
 ├── models/
 │   ├── __init__.py
 │   └── mcp_config.py         # mcp.config.settings transient model (16 config params)
