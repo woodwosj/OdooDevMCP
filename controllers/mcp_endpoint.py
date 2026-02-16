@@ -20,36 +20,83 @@ class MCPController(http.Controller):
     Falls back to session auth when the header is absent.
     """
 
-    @http.route('/mcp/v1', type='jsonrpc', auth='bearer', methods=['POST'], csrf=False)
+    @http.route('/mcp/v1', type='http', auth='bearer', methods=['POST'], csrf=False)
     def mcp_endpoint(self, **kwargs):
-        """Main MCP JSON-RPC endpoint."""
+        """Main MCP JSON-RPC endpoint.
+
+        Uses type='http' instead of type='jsonrpc' so we control the full
+        request/response cycle.  Odoo's jsonrpc type auto-wraps the return
+        value in its own JSON-RPC envelope, which double-wraps the response
+        that MCPServerHandler already builds.  Claude Code's MCP HTTP
+        transport expects a clean, single JSON-RPC response.
+        """
+        request_id = None
         try:
-            # Get JSON-RPC request
-            jsonrpc_request = request.jsonrequest
-            if not jsonrpc_request:
-                raise BadRequest("Invalid JSON-RPC request")
+            # Parse the raw JSON body ourselves
+            raw_data = request.httprequest.get_data(as_text=True)
+            if not raw_data:
+                return Response(
+                    json.dumps({
+                        'jsonrpc': '2.0',
+                        'error': {
+                            'code': -32700,
+                            'message': 'Parse error',
+                            'data': 'Empty request body',
+                        },
+                        'id': None,
+                    }),
+                    content_type='application/json',
+                    status=200,
+                )
+
+            try:
+                jsonrpc_request = json.loads(raw_data)
+            except (json.JSONDecodeError, ValueError) as parse_err:
+                return Response(
+                    json.dumps({
+                        'jsonrpc': '2.0',
+                        'error': {
+                            'code': -32700,
+                            'message': 'Parse error',
+                            'data': str(parse_err),
+                        },
+                        'id': None,
+                    }),
+                    content_type='application/json',
+                    status=200,
+                )
+
+            request_id = jsonrpc_request.get('id')
 
             _logger.debug(f"MCP: Received request: {jsonrpc_request.get('method')}")
 
             # Create MCP server handler
             handler = MCPServerHandler(request.env, request.httprequest)
 
-            # Process request
-            response = handler.handle_request(jsonrpc_request)
+            # Process request – handler returns a full JSON-RPC response dict
+            result = handler.handle_request(jsonrpc_request)
 
-            return response
+            return Response(
+                json.dumps(result),
+                content_type='application/json',
+                status=200,
+            )
 
         except Exception as e:
             _logger.error(f"MCP: Error handling request: {e}", exc_info=True)
-            return {
-                'jsonrpc': '2.0',
-                'error': {
-                    'code': -32603,
-                    'message': 'Internal error',
-                    'data': str(e)
-                },
-                'id': request.jsonrequest.get('id') if request.jsonrequest else None
-            }
+            return Response(
+                json.dumps({
+                    'jsonrpc': '2.0',
+                    'error': {
+                        'code': -32603,
+                        'message': 'Internal error',
+                        'data': str(e),
+                    },
+                    'id': request_id,
+                }),
+                content_type='application/json',
+                status=200,
+            )
 
     @http.route('/mcp/v1/health', type='http', auth='none', methods=['GET'], csrf=False)
     def health_check(self):
