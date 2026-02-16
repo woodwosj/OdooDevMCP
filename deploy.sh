@@ -83,7 +83,11 @@ fi
 echo "Extracting module to $CUSTOM_ADDONS..."
 cd "$CUSTOM_ADDONS"
 tar -xzf /tmp/$ARCHIVE_NAME
-mv "$MODULE_NAME" "$MODULE_PATH" 2>/dev/null || true
+# Rename extracted directory to module name (handles OdooDevMCP -> odoo_dev_mcp)
+EXTRACTED_DIR=\$(ls -d */ | grep -iv __pycache__ | head -1 | tr -d '/')
+if [ "\$EXTRACTED_DIR" != "$MODULE_NAME" ] && [ -d "\$EXTRACTED_DIR" ]; then
+    mv "\$EXTRACTED_DIR" "$MODULE_NAME"
+fi
 
 # Set correct ownership
 echo "Setting ownership to $ODOO_USER:$ODOO_GROUP..."

@@ -7,7 +7,7 @@ Receives registration and heartbeat messages from Odoo MCP servers.
 import argparse
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from flask import Flask, request, jsonify
 
 app = Flask(__name__)
@@ -22,14 +22,14 @@ startup_time = time.time()
 
 def get_current_timestamp():
     """Generate UTC ISO timestamp with 'Z' suffix."""
-    return datetime.utcnow().isoformat() + 'Z'
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 def is_stale(last_seen_str, threshold_seconds=120):
     """Check if a server is stale based on last_seen timestamp."""
     try:
-        last_seen = datetime.fromisoformat(last_seen_str.replace('Z', ''))
-        now = datetime.utcnow()
+        last_seen = datetime.fromisoformat(last_seen_str.replace('Z', '+00:00'))
+        now = datetime.now(timezone.utc)
         delta = (now - last_seen).total_seconds()
         return delta > threshold_seconds
     except (ValueError, AttributeError):
