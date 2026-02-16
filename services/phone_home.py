@@ -53,6 +53,9 @@ def register_server(env) -> bool:
         bool: True if registration successful, False otherwise
     """
     try:
+        # Import tool registry to get dynamic capabilities
+        from ..tools.registry import get_tool_registry
+
         # Get configuration
         ICP = env['ir.config_parameter'].sudo()
         phone_home_url = ICP.get_param('mcp.phone_home_url', default=False)
@@ -84,21 +87,7 @@ def register_server(env) -> bool:
             "version": "1.0.0",
             "odoo_version": odoo_version,
             "database": env.cr.dbname,
-            "capabilities": [
-                "execute_command",
-                "query_database",
-                "execute_sql",
-                "get_db_schema",
-                "read_file",
-                "write_file",
-                "odoo_shell",
-                "service_status",
-                "read_config",
-                "list_modules",
-                "get_module_info",
-                "install_module",
-                "upgrade_module",
-            ],
+            "capabilities": list(get_tool_registry().keys()),
             "started_at": datetime.utcnow().isoformat() + "Z",
         }
 
@@ -110,8 +99,9 @@ def register_server(env) -> bool:
         import time
         for attempt in range(retry_count):
             try:
+                register_url = phone_home_url.rstrip('/') + '/register'
                 response = requests.post(
-                    phone_home_url,
+                    register_url,
                     json=payload,
                     timeout=timeout,
                 )
@@ -171,9 +161,7 @@ def send_heartbeat(env) -> bool:
         }
 
         # Send to /heartbeat endpoint
-        heartbeat_url = phone_home_url
-        if not heartbeat_url.endswith("/heartbeat"):
-            heartbeat_url = heartbeat_url.rstrip("/") + "/heartbeat"
+        heartbeat_url = phone_home_url.rstrip('/') + '/heartbeat'
 
         timeout = int(ICP.get_param('mcp.phone_home_timeout', default=5))
 

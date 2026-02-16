@@ -7,6 +7,7 @@ from odoo.http import request, Response
 from werkzeug.exceptions import BadRequest
 
 from ..services.mcp_server import MCPServerHandler
+from ..tools.registry import get_tool_registry
 
 _logger = logging.getLogger(__name__)
 
@@ -81,21 +82,7 @@ class MCPController(http.Controller):
             capabilities = {
                 'version': '1.0.0',
                 'transport': 'http',
-                'tools': [
-                    'execute_command',
-                    'query_database',
-                    'execute_sql',
-                    'get_db_schema',
-                    'read_file',
-                    'write_file',
-                    'odoo_shell',
-                    'service_status',
-                    'read_config',
-                    'list_modules',
-                    'get_module_info',
-                    'upgrade_module',
-                    'install_module',
-                ],
+                'tools': list(get_tool_registry().keys()),
                 'resources': [
                     'odoo://config',
                     'odoo://logs/{service}',

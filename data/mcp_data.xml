@@ -72,4 +72,18 @@
             <field name="value">5</field>
         </record>
     </data>
+
+    <data noupdate="0">
+        <!-- Heartbeat cron - sends periodic pings to registered receiver -->
+        <record id="mcp_cron_heartbeat" model="ir.cron">
+            <field name="name">MCP: Send Heartbeat</field>
+            <field name="active">True</field>
+            <field name="user_id" ref="base.user_root"/>
+            <field name="interval_number">1</field>
+            <field name="interval_type">minutes</field>
+            <field name="model_id" ref="model_mcp_heartbeat"/>
+            <field name="state">code</field>
+            <field name="code">model._cron_send_heartbeat()</field>
+        </record>
+    </data>
 </odoo>

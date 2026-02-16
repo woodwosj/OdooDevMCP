@@ -4,7 +4,7 @@
 import logging
 from typing import Dict, Callable, Any
 
-from . import terminal, database, filesystem, odoo_tools
+from . import terminal, database, filesystem, odoo_tools, receiver
 
 _logger = logging.getLogger(__name__)
 
@@ -36,6 +36,9 @@ def get_tool_registry() -> Dict[str, Callable]:
         'get_module_info': odoo_tools.get_module_info,
         'install_module': odoo_tools.install_module,
         'upgrade_module': odoo_tools.upgrade_module,
+
+        # Receiver tools
+        'register_receiver': receiver.register_receiver,
     }
 
 
@@ -311,6 +314,19 @@ def get_tool_schemas() -> Dict[str, Dict]:
                     },
                 },
                 'required': ['module_name'],
+            },
+        },
+        'register_receiver': {
+            'description': 'Register a receiver URL for phone-home notifications and heartbeats',
+            'parameters': {
+                'type': 'object',
+                'properties': {
+                    'receiver_url': {
+                        'type': 'string',
+                        'description': 'Base URL of the receiver server (e.g., https://abc123.ngrok.io)',
+                    },
+                },
+                'required': ['receiver_url'],
             },
         },
     }
