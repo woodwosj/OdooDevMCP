@@ -1,222 +1,152 @@
-"""Tests for rate limiting functionality (H3)."""
+"""Tests for the check_rate_limit function (sliding window, thread safety, edge cases)."""
 
+import threading
 import time
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
-from odoo_dev_mcp.utils.security import RateLimiter, command_limiter, query_limiter, shell_limiter
+from OdooDevMCP.security.security import _rate_limit_state, check_rate_limit
 
 
-class TestRateLimiterBasics:
-    """Test basic rate limiter functionality."""
+# ---------------------------------------------------------------------------
+# Basic behaviour
+# ---------------------------------------------------------------------------
 
-    def test_allows_requests_within_limit(self):
-        """Should allow requests up to the limit."""
-        limiter = RateLimiter(max_calls=3, period=60)
+class TestCheckRateLimitBasics:
 
-        assert limiter.allow() is True
-        assert limiter.allow() is True
-        assert limiter.allow() is True
-        assert limiter.allow() is False
+    def test_allows_requests_within_limit(self, mock_env):
+        for _ in range(3):
+            check_rate_limit(mock_env, "basic", max_calls=3, period=60)
 
-    def test_resets_after_time_period(self):
-        """Should reset after the time period elapses."""
-        limiter = RateLimiter(max_calls=2, period=0.05)  # 50ms
+        with pytest.raises(RuntimeError, match="Rate limit exceeded"):
+            check_rate_limit(mock_env, "basic", max_calls=3, period=60)
 
-        # Use up limit
-        assert limiter.allow() is True
-        assert limiter.allow() is True
-        assert limiter.allow() is False
+    def test_resets_after_time_period(self, mock_env):
+        check_rate_limit(mock_env, "reset", max_calls=1, period=0.05)
 
-        # Wait for period to pass
+        with pytest.raises(RuntimeError):
+            check_rate_limit(mock_env, "reset", max_calls=1, period=0.05)
+
         time.sleep(0.06)
-
         # Should allow again
-        assert limiter.allow() is True
+        check_rate_limit(mock_env, "reset", max_calls=1, period=0.05)
 
-    def test_sliding_window_behavior(self):
-        """Should implement sliding window (not fixed window)."""
-        limiter = RateLimiter(max_calls=2, period=0.1)
-
+    def test_sliding_window_behavior(self, mock_env):
+        """Calls at the edge of the window should slide out correctly."""
         # First call at t=0
-        assert limiter.allow() is True
+        check_rate_limit(mock_env, "slide", max_calls=2, period=0.1)
         time.sleep(0.03)
 
         # Second call at t=30ms
-        assert limiter.allow() is True
+        check_rate_limit(mock_env, "slide", max_calls=2, period=0.1)
         time.sleep(0.03)
 
         # Third call at t=60ms (should fail, first call still in window)
-        assert limiter.allow() is False
+        with pytest.raises(RuntimeError):
+            check_rate_limit(mock_env, "slide", max_calls=2, period=0.1)
+
         time.sleep(0.05)
 
         # Fourth call at t=110ms (should succeed, first call expired)
-        assert limiter.allow() is True
+        check_rate_limit(mock_env, "slide", max_calls=2, period=0.1)
 
 
-class TestRateLimiterThreadSafety:
-    """Test thread safety of rate limiter."""
+# ---------------------------------------------------------------------------
+# Thread safety
+# ---------------------------------------------------------------------------
 
-    def test_concurrent_access(self):
-        """Should handle concurrent access safely."""
-        import threading
+class TestCheckRateLimitThreadSafety:
 
-        limiter = RateLimiter(max_calls=5, period=60)
+    def test_concurrent_access(self, mock_env):
+        """Concurrent threads should respect the limit."""
         results = []
         lock = threading.Lock()
 
         def make_request():
-            allowed = limiter.allow()
-            with lock:
-                results.append(allowed)
+            try:
+                check_rate_limit(mock_env, "thread", max_calls=5, period=60)
+                with lock:
+                    results.append(True)
+            except RuntimeError:
+                with lock:
+                    results.append(False)
 
-        # Create 10 threads
         threads = [threading.Thread(target=make_request) for _ in range(10)]
-
-        # Start all threads
         for t in threads:
             t.start()
-
-        # Wait for completion
         for t in threads:
             t.join()
 
-        # Should have exactly 5 True and 5 False
         assert results.count(True) == 5
         assert results.count(False) == 5
 
-    def test_no_race_conditions(self):
-        """Should not have race conditions in call tracking."""
-        import threading
-
-        limiter = RateLimiter(max_calls=100, period=1)
-
-        def make_many_calls():
+    def test_no_race_conditions_in_tracking(self, mock_env):
+        """All calls should be tracked without loss."""
+        def make_calls():
             for _ in range(10):
-                limiter.allow()
+                try:
+                    check_rate_limit(mock_env, "race", max_calls=100, period=60)
+                except RuntimeError:
+                    pass
 
-        # Multiple threads making calls
-        threads = [threading.Thread(target=make_many_calls) for _ in range(10)]
-
+        threads = [threading.Thread(target=make_calls) for _ in range(10)]
         for t in threads:
             t.start()
         for t in threads:
             t.join()
 
-        # Total calls should be exactly 100 (not more due to race conditions)
-        assert len(limiter.calls) == 100
+        # Should have exactly 100 calls tracked
+        assert len(_rate_limit_state["test_db"]["race"]) == 100
 
 
-class TestGlobalLimiters:
-    """Test global rate limiter instances."""
+# ---------------------------------------------------------------------------
+# Edge cases
+# ---------------------------------------------------------------------------
 
-    def test_command_limiter_configured(self):
-        """Command limiter should be configured with appropriate limits."""
-        assert command_limiter.max_calls == 10
-        assert command_limiter.period == 60
+class TestCheckRateLimitEdgeCases:
 
-    def test_query_limiter_configured(self):
-        """Query limiter should be configured with appropriate limits."""
-        assert query_limiter.max_calls == 100
-        assert query_limiter.period == 60
+    def test_zero_max_calls_rejects_all(self, mock_env):
+        with pytest.raises(RuntimeError):
+            check_rate_limit(mock_env, "zero", max_calls=0, period=60)
 
-    def test_shell_limiter_configured(self):
-        """Shell limiter should be configured with appropriate limits."""
-        assert shell_limiter.max_calls == 5
-        assert shell_limiter.period == 60
+    def test_very_short_period(self, mock_env):
+        check_rate_limit(mock_env, "short", max_calls=1, period=0.001)
 
-
-class TestRateLimitIntegration:
-    """Test rate limiting integration with tools."""
-
-    @patch("odoo_dev_mcp.tools.terminal.subprocess.run")
-    @patch("odoo_dev_mcp.tools.terminal.get_config")
-    @patch("odoo_dev_mcp.tools.terminal.audit_log")
-    def test_terminal_enforces_rate_limit(self, mock_audit, mock_get_config, mock_run):
-        """Terminal tool should enforce rate limiting."""
-        from odoo_dev_mcp.tools.terminal import execute_command
-        from odoo_dev_mcp.utils.security import command_limiter
-
-        # Reset limiter
-        command_limiter.calls = []
-        command_limiter.max_calls = 2
-        command_limiter.period = 60
-
-        mock_config = Mock()
-        mock_config.command.max_timeout = 600
-        mock_config.command.working_directory = "/tmp"
-        mock_get_config.return_value = mock_config
-
-        mock_result = Mock()
-        mock_result.returncode = 0
-        mock_result.stdout = ""
-        mock_result.stderr = ""
-        mock_run.return_value = mock_result
-
-        # First two should succeed
-        execute_command("echo 1")
-        execute_command("echo 2")
-
-        # Third should fail with rate limit
-        with pytest.raises(RuntimeError, match="Rate limit exceeded"):
-            execute_command("echo 3")
-
-    @patch("odoo_dev_mcp.tools.odoo_shell.subprocess.run")
-    @patch("odoo_dev_mcp.tools.odoo_shell.get_config")
-    @patch("odoo_dev_mcp.tools.odoo_shell.audit_log")
-    def test_shell_enforces_rate_limit(self, mock_audit, mock_get_config, mock_run):
-        """Odoo shell tool should enforce rate limiting."""
-        from odoo_dev_mcp.tools.odoo_shell import odoo_shell
-        from odoo_dev_mcp.utils.security import shell_limiter
-
-        # Reset limiter
-        shell_limiter.calls = []
-        shell_limiter.max_calls = 1
-        shell_limiter.period = 60
-
-        mock_config = Mock()
-        mock_config.database.name = "test_db"
-        mock_config.odoo.shell_command = "odoo shell"
-        mock_config.odoo.config_path = "/etc/odoo/odoo.conf"
-        mock_get_config.return_value = mock_config
-
-        mock_result = Mock()
-        mock_result.returncode = 0
-        mock_result.stdout = ""
-        mock_result.stderr = ""
-        mock_run.return_value = mock_result
-
-        # First should succeed
-        odoo_shell("print('test')")
-
-        # Second should fail with rate limit
-        with pytest.raises(RuntimeError, match="Rate limit exceeded"):
-            odoo_shell("print('test2')")
-
-
-class TestRateLimiterEdgeCases:
-    """Test edge cases in rate limiting."""
-
-    def test_zero_max_calls(self):
-        """Limiter with max_calls=0 should reject all."""
-        limiter = RateLimiter(max_calls=0, period=60)
-        assert limiter.allow() is False
-
-    def test_very_short_period(self):
-        """Should handle very short time periods."""
-        limiter = RateLimiter(max_calls=1, period=0.001)  # 1ms
-
-        assert limiter.allow() is True
-        assert limiter.allow() is False
+        with pytest.raises(RuntimeError):
+            check_rate_limit(mock_env, "short", max_calls=1, period=0.001)
 
         time.sleep(0.002)
-        assert limiter.allow() is True
+        check_rate_limit(mock_env, "short", max_calls=1, period=0.001)
 
-    def test_very_long_period(self):
-        """Should handle very long time periods."""
-        limiter = RateLimiter(max_calls=2, period=3600)  # 1 hour
+    def test_very_long_period(self, mock_env):
+        check_rate_limit(mock_env, "long", max_calls=2, period=3600)
+        check_rate_limit(mock_env, "long", max_calls=2, period=3600)
 
-        assert limiter.allow() is True
-        assert limiter.allow() is True
-        assert limiter.allow() is False
+        with pytest.raises(RuntimeError):
+            check_rate_limit(mock_env, "long", max_calls=2, period=3600)
+
+    def test_per_database_isolation(self):
+        """Different database names should have independent limits."""
+        env_a = MagicMock()
+        env_a.cr.dbname = "db_alpha"
+
+        env_b = MagicMock()
+        env_b.cr.dbname = "db_beta"
+
+        check_rate_limit(env_a, "iso", max_calls=1, period=60)
+
+        # env_b should not be affected
+        check_rate_limit(env_b, "iso", max_calls=1, period=60)
+
+        # env_a should be exhausted
+        with pytest.raises(RuntimeError):
+            check_rate_limit(env_a, "iso", max_calls=1, period=60)
+
+    def test_state_cleared_between_tests(self, mock_env):
+        """Verify the autouse reset_rate_limit_state fixture works.
+
+        If this test runs after others that fill the state, it should start clean.
+        """
+        # Should be empty thanks to the fixture
+        assert len(_rate_limit_state) == 0

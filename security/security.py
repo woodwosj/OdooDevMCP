@@ -4,7 +4,7 @@
 import logging
 import os
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -43,7 +43,7 @@ def audit_log(
         log_dir.mkdir(parents=True, exist_ok=True)
 
         # Build log entry
-        timestamp = datetime.utcnow().isoformat() + "Z"
+        timestamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
         user_id = env.uid
         database = env.cr.dbname
 

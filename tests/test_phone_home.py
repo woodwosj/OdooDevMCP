@@ -1,84 +1,33 @@
-"""Tests for phone-home mechanism."""
+"""Tests for phone-home mechanism (register_server, send_heartbeat, get_network_info)."""
 
-import json
 from unittest.mock import MagicMock, Mock, patch
 
 import pytest
 
-from odoo_dev_mcp.phone_home import (
-    get_network_info,
-    register_server,
-    sanitize_metadata,
-    send_heartbeat,
-)
+from OdooDevMCP.services.phone_home import get_network_info, register_server, send_heartbeat
 
 
-class TestSanitizeMetadata:
-    """Test metadata sanitization (C2 fix)."""
-
-    def test_sanitizes_valid_json_types(self):
-        """Should preserve valid JSON types."""
-        metadata = {
-            "string": "value",
-            "number": 42,
-            "float": 3.14,
-            "bool": True,
-            "null": None,
-            "list": [1, 2, 3],
-            "nested": {"key": "value"},
-        }
-
-        result = sanitize_metadata(metadata)
-
-        assert result == metadata
-
-    def test_rejects_non_json_serializable(self):
-        """Should reject non-JSON-serializable types."""
-
-        class CustomObject:
-            pass
-
-        metadata = {"object": CustomObject(), "function": lambda x: x}
-
-        result = sanitize_metadata(metadata)
-
-        # Should return empty dict on error
-        assert result == {}
-
-    def test_prevents_injection_attacks(self):
-        """Should prevent malicious data injection."""
-        # Attempt to inject executable code
-        metadata = {
-            "normal_key": "normal_value",
-            "malicious": {"__class__": "exploit"},
-        }
-
-        result = sanitize_metadata(metadata)
-
-        # Should round-trip through JSON, neutralizing any injection
-        assert isinstance(result, dict)
-        # After JSON round-trip, it should be safe
-        json_str = json.dumps(result)
-        assert "__class__" in json_str  # Key is preserved but value is safe
-
+# ---------------------------------------------------------------------------
+# get_network_info (standalone, no env needed)
+# ---------------------------------------------------------------------------
 
 class TestGetNetworkInfo:
-    """Test network information gathering."""
 
-    @patch("odoo_dev_mcp.phone_home.socket")
+    @patch("OdooDevMCP.services.phone_home.socket")
     def test_gets_hostname_and_ip(self, mock_socket):
-        """Should retrieve hostname and IP addresses."""
         mock_socket.gethostname.return_value = "test-server"
+        mock_socket.AF_INET = 2
+        mock_socket.SOCK_DGRAM = 2
+
+        mock_sock = MagicMock()
+        mock_sock.getsockname.return_value = ("192.168.1.100", 12345)
+        mock_socket.socket.return_value = mock_sock
+
         mock_socket.gethostbyname_ex.return_value = (
             "test-server",
             [],
             ["192.168.1.100", "10.0.0.50"],
         )
-
-        # Mock socket connection for primary IP
-        mock_sock = MagicMock()
-        mock_sock.getsockname.return_value = ("192.168.1.100", 12345)
-        mock_socket.socket.return_value = mock_sock
 
         result = get_network_info()
 
@@ -86,43 +35,35 @@ class TestGetNetworkInfo:
         assert result["primary"] == "192.168.1.100"
         assert "192.168.1.100" in result["all"]
 
-    @patch("odoo_dev_mcp.phone_home.socket")
+    @patch("OdooDevMCP.services.phone_home.socket")
     def test_handles_network_errors_gracefully(self, mock_socket):
-        """Should handle network errors and return defaults."""
         mock_socket.gethostname.return_value = "test-server"
+        mock_socket.AF_INET = 2
+        mock_socket.SOCK_DGRAM = 2
         mock_socket.socket.side_effect = Exception("Network error")
         mock_socket.gethostbyname_ex.side_effect = Exception("DNS error")
 
         result = get_network_info()
 
         assert result["hostname"] == "test-server"
-        # Should have fallback IP
-        assert "primary" in result
+        assert result["primary"] == "127.0.0.1"
 
+
+# ---------------------------------------------------------------------------
+# register_server
+# ---------------------------------------------------------------------------
 
 class TestRegisterServer:
-    """Test server registration."""
 
-    @patch("odoo_dev_mcp.phone_home.requests.post")
-    @patch("odoo_dev_mcp.phone_home.get_config")
-    @patch("odoo_dev_mcp.phone_home.get_network_info")
-    @patch("odoo_dev_mcp.phone_home.get_server_id")
-    def test_sends_registration_payload(
-        self, mock_get_id, mock_get_network, mock_get_config, mock_post
-    ):
-        """Should send registration payload with sanitized metadata."""
-        mock_config = Mock()
-        mock_config.phone_home.url = "http://registry.example.com/register"
-        mock_config.phone_home.retry_count = 1
-        mock_config.phone_home.timeout = 5
-        mock_config.phone_home.extra_metadata = {"env": "test", "region": "us-east"}
-        mock_config.server.port = 8768
-        mock_config.server.transport = "stdio"
-        mock_config.server.version = "1.0.0"
+    @patch("OdooDevMCP.services.phone_home.requests.post")
+    @patch("OdooDevMCP.services.phone_home.get_network_info")
+    def test_sends_registration_payload(self, mock_network, mock_post, mock_env):
+        mock_env._icp_store["mcp.phone_home_url"] = "http://registry.example.com"
+        mock_env._icp_store["mcp.phone_home_retry_count"] = "1"
+        mock_env._icp_store["mcp.phone_home_timeout"] = "5"
+        mock_env._icp_store["mcp.server_port"] = "8768"
 
-        mock_get_config.return_value = mock_config
-        mock_get_id.return_value = "test-uuid"
-        mock_get_network.return_value = {
+        mock_network.return_value = {
             "hostname": "test-server",
             "primary": "192.168.1.100",
             "all": ["192.168.1.100"],
@@ -132,56 +73,53 @@ class TestRegisterServer:
         mock_response.status_code = 200
         mock_post.return_value = mock_response
 
-        result = register_server()
+        result = register_server(mock_env)
 
         assert result is True
         mock_post.assert_called_once()
 
-        # Check that payload was sent
-        call_args = mock_post.call_args
-        payload = call_args[1]["json"]
-
-        assert payload["server_id"] == "test-uuid"
+        # Verify payload
+        call_kwargs = mock_post.call_args[1]
+        payload = call_kwargs["json"]
+        assert payload["server_id"] == "test_db_test-server"
         assert payload["hostname"] == "test-server"
-        assert payload["env"] == "test"
-        assert payload["region"] == "us-east"
+        assert payload["database"] == "test_db"
+        assert "capabilities" in payload
 
-    @patch("odoo_dev_mcp.phone_home.requests.post")
-    @patch("odoo_dev_mcp.phone_home.get_config")
-    def test_skips_registration_when_disabled(self, mock_get_config, mock_post):
-        """Should skip registration when URL is not configured."""
-        mock_config = Mock()
-        mock_config.phone_home.url = None
+        # URL should have /register appended
+        called_url = mock_post.call_args[0][0]
+        assert called_url.endswith("/register")
 
-        mock_get_config.return_value = mock_config
+    @patch("OdooDevMCP.services.phone_home.requests.post")
+    def test_skips_when_no_url_configured(self, mock_post, mock_env):
+        """Should return False when phone_home_url is not set."""
+        mock_env._icp_store["mcp.phone_home_url"] = ""
 
-        result = register_server()
+        result = register_server(mock_env)
 
         assert result is False
         mock_post.assert_not_called()
 
-    @patch("odoo_dev_mcp.phone_home.requests.post")
-    @patch("odoo_dev_mcp.phone_home.get_config")
-    @patch("odoo_dev_mcp.phone_home.get_network_info")
-    @patch("odoo_dev_mcp.phone_home.get_server_id")
-    @patch("odoo_dev_mcp.phone_home.time.sleep")  # Speed up test
-    def test_retries_on_failure(
-        self, mock_sleep, mock_get_id, mock_get_network, mock_get_config, mock_post
-    ):
-        """Should retry registration on failure."""
-        mock_config = Mock()
-        mock_config.phone_home.url = "http://registry.example.com/register"
-        mock_config.phone_home.retry_count = 3
-        mock_config.phone_home.retry_backoff = 2
-        mock_config.phone_home.timeout = 5
-        mock_config.phone_home.extra_metadata = {}
-        mock_config.server.port = 8768
-        mock_config.server.transport = "stdio"
-        mock_config.server.version = "1.0.0"
+    @patch("OdooDevMCP.services.phone_home.requests.post")
+    def test_skips_when_url_is_false(self, mock_post, mock_env):
+        """ICP returns False (Odoo falsy) when param is not set."""
+        mock_env._icp_store.pop("mcp.phone_home_url", None)
+        # get_param will return default=False
 
-        mock_get_config.return_value = mock_config
-        mock_get_id.return_value = "test-uuid"
-        mock_get_network.return_value = {
+        result = register_server(mock_env)
+
+        assert result is False
+        mock_post.assert_not_called()
+
+    @patch("time.sleep")
+    @patch("OdooDevMCP.services.phone_home.requests.post")
+    @patch("OdooDevMCP.services.phone_home.get_network_info")
+    def test_retries_on_failure(self, mock_network, mock_post, mock_sleep, mock_env):
+        mock_env._icp_store["mcp.phone_home_url"] = "http://registry.example.com"
+        mock_env._icp_store["mcp.phone_home_retry_count"] = "3"
+        mock_env._icp_store["mcp.phone_home_timeout"] = "5"
+
+        mock_network.return_value = {
             "hostname": "test",
             "primary": "127.0.0.1",
             "all": ["127.0.0.1"],
@@ -194,40 +132,113 @@ class TestRegisterServer:
             Mock(status_code=200),
         ]
 
-        result = register_server()
+        result = register_server(mock_env)
 
         assert result is True
         assert mock_post.call_count == 3
 
+    @patch("time.sleep")
+    @patch("OdooDevMCP.services.phone_home.requests.post")
+    @patch("OdooDevMCP.services.phone_home.get_network_info")
+    def test_returns_false_after_all_retries_fail(self, mock_network, mock_post, mock_sleep, mock_env):
+        mock_env._icp_store["mcp.phone_home_url"] = "http://registry.example.com"
+        mock_env._icp_store["mcp.phone_home_retry_count"] = "2"
+        mock_env._icp_store["mcp.phone_home_timeout"] = "5"
+
+        mock_network.return_value = {
+            "hostname": "test",
+            "primary": "127.0.0.1",
+            "all": ["127.0.0.1"],
+        }
+
+        mock_post.side_effect = Exception("Connection error")
+
+        result = register_server(mock_env)
+
+        assert result is False
+        assert mock_post.call_count == 2
+
+
+# ---------------------------------------------------------------------------
+# send_heartbeat
+# ---------------------------------------------------------------------------
 
 class TestSendHeartbeat:
-    """Test heartbeat sending."""
 
-    @patch("odoo_dev_mcp.phone_home.requests.post")
-    @patch("odoo_dev_mcp.phone_home.get_config")
-    @patch("odoo_dev_mcp.phone_home.get_server_id")
-    def test_sends_heartbeat(self, mock_get_id, mock_get_config, mock_post):
-        """Should send heartbeat with status."""
-        mock_config = Mock()
-        mock_config.phone_home.url = "http://registry.example.com/register"
-        mock_config.phone_home.timeout = 5
+    @patch("OdooDevMCP.services.phone_home.requests.post")
+    @patch("OdooDevMCP.services.phone_home.get_network_info")
+    def test_sends_heartbeat(self, mock_network, mock_post, mock_env):
+        mock_env._icp_store["mcp.phone_home_url"] = "http://registry.example.com"
+        mock_env._icp_store["mcp.phone_home_timeout"] = "5"
 
-        mock_get_config.return_value = mock_config
-        mock_get_id.return_value = "test-uuid"
+        mock_network.return_value = {
+            "hostname": "test-server",
+            "primary": "192.168.1.100",
+            "all": ["192.168.1.100"],
+        }
 
         mock_response = Mock()
         mock_response.status_code = 200
         mock_post.return_value = mock_response
 
-        result = send_heartbeat(start_time=1000.0, active_connections=2)
+        result = send_heartbeat(mock_env)
 
         assert result is True
         mock_post.assert_called_once()
 
-        # Check payload
-        call_args = mock_post.call_args
-        payload = call_args[1]["json"]
-
-        assert payload["server_id"] == "test-uuid"
+        # Verify payload
+        call_kwargs = mock_post.call_args[1]
+        payload = call_kwargs["json"]
+        assert payload["server_id"] == "test_db_test-server"
         assert payload["status"] == "healthy"
-        assert payload["active_connections"] == 2
+
+        # URL should have /heartbeat appended
+        called_url = mock_post.call_args[0][0]
+        assert called_url.endswith("/heartbeat")
+
+    @patch("OdooDevMCP.services.phone_home.requests.post")
+    def test_returns_false_when_no_url(self, mock_post, mock_env):
+        mock_env._icp_store["mcp.phone_home_url"] = ""
+
+        result = send_heartbeat(mock_env)
+
+        assert result is False
+        mock_post.assert_not_called()
+
+    @patch("OdooDevMCP.services.phone_home.requests.post")
+    @patch("OdooDevMCP.services.phone_home.get_network_info")
+    def test_returns_false_on_http_error(self, mock_network, mock_post, mock_env):
+        mock_env._icp_store["mcp.phone_home_url"] = "http://registry.example.com"
+        mock_env._icp_store["mcp.phone_home_timeout"] = "5"
+
+        mock_network.return_value = {
+            "hostname": "test",
+            "primary": "127.0.0.1",
+            "all": ["127.0.0.1"],
+        }
+
+        mock_response = Mock()
+        mock_response.status_code = 500
+        mock_post.return_value = mock_response
+
+        result = send_heartbeat(mock_env)
+
+        assert result is False
+
+    @patch("OdooDevMCP.services.phone_home.requests.post")
+    @patch("OdooDevMCP.services.phone_home.get_network_info")
+    def test_returns_false_on_exception(self, mock_network, mock_post, mock_env):
+        mock_env._icp_store["mcp.phone_home_url"] = "http://registry.example.com"
+        mock_env._icp_store["mcp.phone_home_timeout"] = "5"
+
+        mock_network.return_value = {
+            "hostname": "test",
+            "primary": "127.0.0.1",
+            "all": ["127.0.0.1"],
+        }
+
+        mock_post.side_effect = Exception("Network error")
+
+        result = send_heartbeat(mock_env)
+
+        assert result is False

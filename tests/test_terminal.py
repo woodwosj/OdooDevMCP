@@ -1,129 +1,133 @@
-"""Tests for terminal command execution."""
+"""Tests for terminal command execution tool."""
 
 import subprocess
 from unittest.mock import MagicMock, Mock, patch
 
 import pytest
 
-from odoo_dev_mcp.tools.terminal import execute_command
+from OdooDevMCP.tools.terminal import execute_command
 
 
 class TestExecuteCommand:
-    """Test terminal command execution."""
+    """Test execute_command(env, command, ...)."""
 
-    @patch("odoo_dev_mcp.tools.terminal.subprocess.run")
-    @patch("odoo_dev_mcp.tools.terminal.get_config")
-    @patch("odoo_dev_mcp.tools.terminal.audit_log")
-    def test_executes_simple_command(self, mock_audit, mock_get_config, mock_run, mock_config):
-        """Should execute command and return results."""
-        mock_get_config.return_value = mock_config
-
+    @patch("OdooDevMCP.tools.terminal.subprocess.run")
+    def test_executes_simple_command(self, mock_run, mock_env):
         mock_result = Mock()
         mock_result.returncode = 0
-        mock_result.stdout = "output"
+        mock_result.stdout = "hello"
         mock_result.stderr = ""
         mock_run.return_value = mock_result
 
-        result = execute_command("echo test")
+        result = execute_command(mock_env, "echo hello")
 
         assert result["exit_code"] == 0
-        assert result["stdout"] == "output"
+        assert result["stdout"] == "hello"
         assert result["stderr"] == ""
         assert result["timed_out"] is False
-        mock_audit.assert_called_once()
+        assert "duration_ms" in result
 
-    @patch("odoo_dev_mcp.tools.terminal.subprocess.run")
-    @patch("odoo_dev_mcp.tools.terminal.get_config")
-    @patch("odoo_dev_mcp.tools.terminal.audit_log")
-    def test_handles_timeout(self, mock_audit, mock_get_config, mock_run, mock_config):
-        """Should handle timeout and kill process (H4 fix)."""
-        mock_get_config.return_value = mock_config
-
-        # Simulate timeout
+    @patch("OdooDevMCP.tools.terminal.subprocess.run")
+    def test_handles_timeout(self, mock_run, mock_env):
         timeout_exc = subprocess.TimeoutExpired("test", 5)
         timeout_exc.stdout = b"partial output"
         timeout_exc.stderr = b"partial error"
         mock_run.side_effect = timeout_exc
 
-        with patch("odoo_dev_mcp.tools.terminal.subprocess.run") as mock_pkill:
-            result = execute_command("sleep 100", timeout=5)
+        result = execute_command(mock_env, "sleep 100", timeout=5)
 
         assert result["exit_code"] == -1
         assert result["timed_out"] is True
         assert result["stdout"] == "partial output"
         assert result["stderr"] == "partial error"
 
-    @patch("odoo_dev_mcp.tools.terminal.subprocess.run")
-    @patch("odoo_dev_mcp.tools.terminal.get_config")
-    @patch("odoo_dev_mcp.tools.terminal.audit_log")
-    @patch("odoo_dev_mcp.tools.terminal.command_limiter")
-    def test_enforces_rate_limit(
-        self, mock_limiter, mock_audit, mock_get_config, mock_run, mock_config
-    ):
-        """Should enforce rate limiting (H3 fix)."""
-        mock_get_config.return_value = mock_config
-        mock_limiter.allow.return_value = False
+    @patch("OdooDevMCP.tools.terminal.subprocess.run")
+    def test_handles_timeout_with_none_output(self, mock_run, mock_env):
+        timeout_exc = subprocess.TimeoutExpired("test", 5)
+        timeout_exc.stdout = None
+        timeout_exc.stderr = None
+        mock_run.side_effect = timeout_exc
 
-        with pytest.raises(RuntimeError, match="Rate limit exceeded"):
-            execute_command("echo test")
+        result = execute_command(mock_env, "sleep 100", timeout=5)
 
-        mock_run.assert_not_called()
+        assert result["timed_out"] is True
+        assert result["stdout"] == ""
+        assert result["stderr"] == ""
 
-    @patch("odoo_dev_mcp.tools.terminal.subprocess.run")
-    @patch("odoo_dev_mcp.tools.terminal.get_config")
-    @patch("odoo_dev_mcp.tools.terminal.audit_log")
-    def test_respects_max_timeout(self, mock_audit, mock_get_config, mock_run, mock_config):
-        """Should clamp timeout to max_timeout."""
-        mock_get_config.return_value = mock_config
-        mock_config.command.max_timeout = 100
+    def test_enforces_rate_limit(self, mock_env):
+        """After 10 calls, rate limit should kick in."""
+        with patch("OdooDevMCP.tools.terminal.subprocess.run") as mock_run:
+            mock_result = Mock(returncode=0, stdout="", stderr="")
+            mock_run.return_value = mock_result
 
-        mock_result = Mock()
-        mock_result.returncode = 0
-        mock_result.stdout = ""
-        mock_result.stderr = ""
+            for _ in range(10):
+                execute_command(mock_env, "echo ok")
+
+            with pytest.raises(RuntimeError, match="Rate limit exceeded"):
+                execute_command(mock_env, "echo blocked")
+
+    @patch("OdooDevMCP.tools.terminal.subprocess.run")
+    def test_respects_max_timeout(self, mock_run, mock_env):
+        """Timeout should be clamped to max_timeout from ICP."""
+        mock_env._icp_store["mcp.command_max_timeout"] = "100"
+
+        mock_result = Mock(returncode=0, stdout="", stderr="")
         mock_run.return_value = mock_result
 
-        execute_command("echo test", timeout=999)
+        execute_command(mock_env, "echo test", timeout=999)
 
-        # Should call subprocess with clamped timeout
         call_kwargs = mock_run.call_args[1]
         assert call_kwargs["timeout"] == 100
 
-    @patch("odoo_dev_mcp.tools.terminal.subprocess.run")
-    @patch("odoo_dev_mcp.tools.terminal.get_config")
-    @patch("odoo_dev_mcp.tools.terminal.audit_log")
-    def test_uses_custom_env_vars(self, mock_audit, mock_get_config, mock_run, mock_config):
-        """Should merge custom environment variables."""
-        mock_get_config.return_value = mock_config
-
-        mock_result = Mock()
-        mock_result.returncode = 0
-        mock_result.stdout = ""
-        mock_result.stderr = ""
+    @patch("OdooDevMCP.tools.terminal.subprocess.run")
+    def test_uses_custom_env_vars(self, mock_run, mock_env):
+        mock_result = Mock(returncode=0, stdout="", stderr="")
         mock_run.return_value = mock_result
 
-        execute_command("echo test", env={"CUSTOM_VAR": "value"})
+        execute_command(mock_env, "echo test", env_vars={"CUSTOM_VAR": "value"})
 
         call_kwargs = mock_run.call_args[1]
         assert "CUSTOM_VAR" in call_kwargs["env"]
         assert call_kwargs["env"]["CUSTOM_VAR"] == "value"
 
-    @patch("odoo_dev_mcp.tools.terminal.subprocess.run")
-    @patch("odoo_dev_mcp.tools.terminal.get_config")
-    @patch("odoo_dev_mcp.tools.terminal.audit_log")
-    def test_uses_custom_working_directory(
-        self, mock_audit, mock_get_config, mock_run, mock_config
-    ):
-        """Should use custom working directory."""
-        mock_get_config.return_value = mock_config
-
-        mock_result = Mock()
-        mock_result.returncode = 0
-        mock_result.stdout = ""
-        mock_result.stderr = ""
+    @patch("OdooDevMCP.tools.terminal.subprocess.run")
+    def test_uses_custom_working_directory(self, mock_run, mock_env):
+        mock_result = Mock(returncode=0, stdout="", stderr="")
         mock_run.return_value = mock_result
 
-        execute_command("ls", working_directory="/custom/dir")
+        execute_command(mock_env, "ls", working_directory="/custom/dir")
 
         call_kwargs = mock_run.call_args[1]
         assert call_kwargs["cwd"] == "/custom/dir"
+
+    @patch("OdooDevMCP.tools.terminal.subprocess.run")
+    def test_default_working_directory(self, mock_run, mock_env):
+        """When no working_directory is given, should default to /opt/odoo."""
+        mock_result = Mock(returncode=0, stdout="", stderr="")
+        mock_run.return_value = mock_result
+
+        execute_command(mock_env, "ls")
+
+        call_kwargs = mock_run.call_args[1]
+        assert call_kwargs["cwd"] == "/opt/odoo"
+
+    @patch("OdooDevMCP.tools.terminal.subprocess.run")
+    def test_general_exception_handling(self, mock_run, mock_env):
+        """Non-timeout exceptions should return exit_code -2."""
+        mock_run.side_effect = OSError("Permission denied")
+
+        result = execute_command(mock_env, "bad_cmd")
+
+        assert result["exit_code"] == -2
+        assert "Permission denied" in result["stderr"]
+
+    @patch("OdooDevMCP.tools.terminal.subprocess.run")
+    def test_zero_timeout_means_no_timeout(self, mock_run, mock_env):
+        """timeout=0 should translate to None (no timeout)."""
+        mock_result = Mock(returncode=0, stdout="", stderr="")
+        mock_run.return_value = mock_result
+
+        execute_command(mock_env, "echo test", timeout=0)
+
+        call_kwargs = mock_run.call_args[1]
+        assert call_kwargs["timeout"] is None

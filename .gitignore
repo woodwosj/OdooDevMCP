@@ -24,6 +24,8 @@ wheels/
 venv/
 env/
 ENV/
+.venv/
+receiver/.venv/
 
 # IDE
 .vscode/

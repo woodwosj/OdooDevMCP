@@ -3,7 +3,7 @@
 
 import logging
 import socket
-from datetime import datetime
+from datetime import datetime, timezone
 
 import requests
 from odoo import release
@@ -88,7 +88,7 @@ def register_server(env) -> bool:
             "odoo_version": odoo_version,
             "database": env.cr.dbname,
             "capabilities": list(get_tool_registry().keys()),
-            "started_at": datetime.utcnow().isoformat() + "Z",
+            "started_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         }
 
         # Get retry configuration
@@ -157,7 +157,7 @@ def send_heartbeat(env) -> bool:
         payload = {
             "server_id": server_id,
             "status": "healthy",
-            "timestamp": datetime.utcnow().isoformat() + "Z",
+            "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         }
 
         # Send to /heartbeat endpoint

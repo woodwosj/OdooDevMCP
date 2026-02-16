@@ -1,221 +1,208 @@
-"""Tests for security utilities."""
+"""Tests for security utilities (validate_path, mask_sensitive_config, audit_log, check_rate_limit)."""
 
 import os
 import time
 from pathlib import Path
-from unittest.mock import Mock, mock_open, patch
+from unittest.mock import patch
 
 import pytest
 
-from odoo_dev_mcp.utils.security import (
-    RateLimiter,
+from OdooDevMCP.security.security import (
     audit_log,
-    command_limiter,
+    check_rate_limit,
     mask_sensitive_config,
     validate_path,
+    _rate_limit_state,
 )
 
+
+# ---------------------------------------------------------------------------
+# validate_path
+# ---------------------------------------------------------------------------
 
 class TestValidatePath:
     """Test path validation and symlink resolution."""
 
     def test_empty_path_raises_error(self):
-        """Empty path should raise ValueError."""
         with pytest.raises(ValueError, match="Path cannot be empty"):
             validate_path("")
 
     def test_path_traversal_rejected(self):
-        """Paths with .. should be rejected."""
         with pytest.raises(ValueError, match="Path traversal not allowed"):
             validate_path("/etc/../etc/passwd")
 
     def test_relative_path_rejected_by_default(self):
-        """Relative paths should be rejected by default."""
         with pytest.raises(ValueError, match="Absolute path required"):
             validate_path("relative/path")
 
     def test_relative_path_allowed_when_specified(self, tmp_path):
-        """Relative paths should be allowed when flag is set."""
         os.chdir(tmp_path)
         result = validate_path("test.txt", allow_relative=True)
         assert result.is_absolute()
 
     def test_absolute_path_accepted(self):
-        """Absolute paths should be accepted."""
         result = validate_path("/tmp/test.txt")
         assert result == Path("/tmp/test.txt")
 
     def test_symlink_resolution(self, tmp_path):
-        """Symlinks should be resolved using realpath."""
-        # Create a real file
         target = tmp_path / "target.txt"
         target.write_text("test")
 
-        # Create a symlink
         link = tmp_path / "link.txt"
         link.symlink_to(target)
 
-        # Validate the symlink - should resolve to target
         result = validate_path(str(link))
         assert result == target.resolve()
 
+    def test_symlink_attack_resolved(self, tmp_path):
+        """Symlinks pointing outside allowed paths should be resolved to real path."""
+        external_file = Path("/tmp/external_security_test.txt")
+        external_file.write_text("sensitive")
+        try:
+            link = tmp_path / "evil_link.txt"
+            link.symlink_to(external_file)
+
+            resolved = validate_path(str(link))
+            assert resolved == external_file.resolve()
+            assert "evil_link" not in str(resolved)
+        finally:
+            external_file.unlink(missing_ok=True)
+
+
+# ---------------------------------------------------------------------------
+# mask_sensitive_config
+# ---------------------------------------------------------------------------
 
 class TestMaskSensitiveConfig:
-    """Test configuration masking."""
 
     def test_masks_password_fields(self):
-        """Password fields should be masked."""
         config = {
             "db_password": "secret123",
             "admin_passwd": "admin123",
             "api_key": "key123",
             "normal_field": "visible",
         }
-
         masked = mask_sensitive_config(config)
-
         assert masked["db_password"] == "***MASKED***"
         assert masked["admin_passwd"] == "***MASKED***"
         assert masked["api_key"] == "***MASKED***"
         assert masked["normal_field"] == "visible"
 
     def test_masks_nested_config(self):
-        """Nested password fields should be masked."""
         config = {
             "database": {"password": "secret", "host": "localhost"},
             "server": {"token": "abc123", "port": 8080},
         }
-
         masked = mask_sensitive_config(config)
-
         assert masked["database"]["password"] == "***MASKED***"
         assert masked["database"]["host"] == "localhost"
         assert masked["server"]["token"] == "***MASKED***"
         assert masked["server"]["port"] == 8080
 
     def test_null_passwords_remain_null(self):
-        """Null password values should stay null, not masked."""
         config = {"db_password": None, "host": "localhost"}
-
         masked = mask_sensitive_config(config)
-
         assert masked["db_password"] is None
         assert masked["host"] == "localhost"
 
+    def test_empty_dict(self):
+        assert mask_sensitive_config({}) == {}
+
+
+# ---------------------------------------------------------------------------
+# audit_log
+# ---------------------------------------------------------------------------
 
 class TestAuditLog:
-    """Test audit logging functionality."""
 
-    def test_audit_log_writes_entry(self, temp_audit_log, mock_config):
-        """Audit log should write formatted entries."""
-        with patch("odoo_dev_mcp.utils.security.get_config", return_value=mock_config):
-            mock_config.logging.audit_log = temp_audit_log
+    def test_audit_log_writes_entry(self, mock_env):
+        """audit_log should write a formatted line to the configured file."""
+        audit_log(
+            mock_env,
+            tool="test_tool",
+            duration_ms=100,
+            param1="value1",
+        )
 
-            audit_log(
-                tool="test_tool",
-                client="test_client",
-                duration_ms=100,
-                param1="value1",
-                param2="value2",
-            )
+        log_path = mock_env._icp_store["mcp.audit_log_path"]
+        content = Path(log_path).read_text()
+        assert "TOOL=test_tool" in content
+        assert "DURATION=100ms" in content
+        assert "PARAM1=value1" in content
+        assert "DB=test_db" in content
 
-            with open(temp_audit_log, "r") as f:
-                content = f.read()
+    def test_audit_log_creates_directory(self, mock_env):
+        """audit_log should create parent directory if missing."""
+        nested_path = str(mock_env._tmp_path / "subdir" / "audit.log")
+        mock_env._icp_store["mcp.audit_log_path"] = nested_path
 
-            assert "TOOL=test_tool" in content
-            assert "CLIENT=test_client" in content
-            assert "DURATION=100ms" in content
-            assert "PARAM1=value1" in content
-            assert "PARAM2=value2" in content
+        audit_log(mock_env, tool="test")
 
-    def test_audit_log_creates_directory(self, tmp_path, mock_config):
-        """Audit log should create parent directory if missing."""
-        log_path = tmp_path / "subdir" / "audit.log"
+        assert Path(nested_path).exists()
+        assert Path(nested_path).parent.is_dir()
 
-        with patch("odoo_dev_mcp.utils.security.get_config", return_value=mock_config):
-            mock_config.logging.audit_log = str(log_path)
+    def test_audit_log_disabled(self, mock_env):
+        """When audit is disabled, no file should be written."""
+        mock_env._icp_store["mcp.audit_enabled"] = "False"
 
-            audit_log(tool="test", client="client")
+        audit_log(mock_env, tool="test_disabled")
 
-            assert log_path.exists()
-            assert log_path.parent.is_dir()
+        log_path = mock_env._icp_store["mcp.audit_log_path"]
+        # File should not exist (or be empty if pre-created)
+        if Path(log_path).exists():
+            assert Path(log_path).read_text() == ""
+
+    def test_audit_log_truncates_long_values(self, mock_env):
+        """Values longer than 100 chars should be truncated."""
+        long_value = "x" * 200
+        audit_log(mock_env, tool="test", data=long_value)
+
+        log_path = mock_env._icp_store["mcp.audit_log_path"]
+        content = Path(log_path).read_text()
+        # Should contain truncated value (100 chars + "...")
+        assert "x" * 100 + "..." in content
 
 
-class TestRateLimiter:
-    """Test rate limiting functionality."""
+# ---------------------------------------------------------------------------
+# check_rate_limit
+# ---------------------------------------------------------------------------
 
-    def test_allows_calls_under_limit(self):
-        """Rate limiter should allow calls under the limit."""
-        limiter = RateLimiter(max_calls=5, period=60)
+class TestCheckRateLimit:
 
-        # Should allow first 5 calls
+    def test_allows_calls_under_limit(self, mock_env):
         for _ in range(5):
-            assert limiter.allow() is True
+            check_rate_limit(mock_env, "test_cat", max_calls=5, period=60)
+        # 6th should fail
+        with pytest.raises(RuntimeError, match="Rate limit exceeded"):
+            check_rate_limit(mock_env, "test_cat", max_calls=5, period=60)
 
-        # Should reject 6th call
-        assert limiter.allow() is False
+    def test_different_categories_independent(self, mock_env):
+        """Rate limits for different categories should not interfere."""
+        check_rate_limit(mock_env, "cat_a", max_calls=1, period=60)
+        # cat_b should still work even though cat_a is exhausted
+        check_rate_limit(mock_env, "cat_b", max_calls=1, period=60)
 
-    def test_resets_after_period(self):
-        """Rate limiter should reset after the time period."""
-        limiter = RateLimiter(max_calls=2, period=0.1)  # 100ms period
+    def test_different_databases_independent(self, mock_env):
+        """Rate limits should be tracked per database."""
+        check_rate_limit(mock_env, "cat", max_calls=1, period=60)
 
-        # Use up the limit
-        assert limiter.allow() is True
-        assert limiter.allow() is True
-        assert limiter.allow() is False
+        # Create a second env with different dbname
+        from unittest.mock import MagicMock
+        env2 = MagicMock()
+        env2.cr.dbname = "other_db"
+        check_rate_limit(env2, "cat", max_calls=1, period=60)
 
-        # Wait for period to expire
-        time.sleep(0.15)
+    def test_sliding_window_expiry(self, mock_env):
+        """Old calls should expire outside the time window."""
+        # Use very short period
+        check_rate_limit(mock_env, "sw", max_calls=1, period=0.05)
+        with pytest.raises(RuntimeError):
+            check_rate_limit(mock_env, "sw", max_calls=1, period=0.05)
 
-        # Should allow again
-        assert limiter.allow() is True
+        time.sleep(0.06)
+        # After window expires, should succeed again
+        check_rate_limit(mock_env, "sw", max_calls=1, period=0.05)
 
-    def test_thread_safety(self):
-        """Rate limiter should be thread-safe."""
-        import threading
-
-        limiter = RateLimiter(max_calls=10, period=60)
-        results = []
-
-        def make_call():
-            results.append(limiter.allow())
-
-        threads = [threading.Thread(target=make_call) for _ in range(20)]
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join()
-
-        # Should have exactly 10 True results and 10 False
-        assert results.count(True) == 10
-        assert results.count(False) == 10
-
-    def test_global_command_limiter_exists(self):
-        """Global command limiter should be initialized."""
-        assert command_limiter is not None
-        assert command_limiter.max_calls == 10
-        assert command_limiter.period == 60
-
-
-class TestC3SymlinkFix:
-    """Test that C3 symlink vulnerability is fixed."""
-
-    def test_symlink_attack_prevented(self, tmp_path):
-        """Symlinks pointing outside allowed paths should be resolved."""
-        # Create a file outside the tmp directory
-        external_file = Path("/tmp/external_file.txt")
-        external_file.write_text("sensitive")
-
-        # Create a symlink in tmp pointing to external file
-        link = tmp_path / "evil_link.txt"
-        link.symlink_to(external_file)
-
-        # Validate should resolve the symlink
-        resolved = validate_path(str(link))
-
-        # Should resolve to the real path, not the link
-        assert resolved == external_file.resolve()
-        assert "evil_link" not in str(resolved)
-
-        # Cleanup
-        external_file.unlink()
+    def test_zero_max_calls_rejects_all(self, mock_env):
+        with pytest.raises(RuntimeError, match="Rate limit exceeded"):
+            check_rate_limit(mock_env, "zero", max_calls=0, period=60)
