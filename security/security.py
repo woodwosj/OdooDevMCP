@@ -36,7 +36,7 @@ def audit_log(
         if not audit_enabled:
             return
 
-        audit_log_path = ICP.get_param('mcp.audit_log_path', default='/var/log/odoo/mcp_audit.log')
+        audit_log_path = ICP.get_param('mcp.audit_log_path', default='/opt/odoo/logs/mcp_audit.log')
 
         # Ensure audit log directory exists
         log_dir = Path(audit_log_path).parent

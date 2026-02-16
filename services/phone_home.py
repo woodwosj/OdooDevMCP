@@ -2,13 +2,27 @@
 """Phone-home registration mechanism."""
 
 import logging
+import os
 import socket
+import time
 from datetime import datetime, timezone
 
 import requests
 from odoo import release
 
 _logger = logging.getLogger(__name__)
+
+# Module-level timestamp for uptime calculation
+_server_start_time = time.time()
+
+
+def get_server_hostname() -> str:
+    """Get current server hostname.
+
+    Returns:
+        str: Current hostname from socket.gethostname()
+    """
+    return socket.gethostname()
 
 
 def get_network_info() -> dict:
@@ -43,6 +57,49 @@ def get_network_info() -> dict:
     }
 
 
+def _build_server_payload(env) -> dict:
+    """Build common server payload fields for registration and heartbeat.
+
+    Args:
+        env: Odoo environment
+
+    Returns:
+        dict: Payload containing server_id, hostname, ip_addresses, port,
+              transport, version, odoo_version, database, capabilities, odoo_stage
+    """
+    # Import tool registry to get dynamic capabilities
+    from ..tools.registry import get_tool_registry
+
+    # Get configuration
+    ICP = env['ir.config_parameter'].sudo()
+    server_port = int(ICP.get_param('mcp.server_port', default=8768))
+
+    # Get network info
+    network_info = get_network_info()
+
+    # Get server ID (use database name + hostname as unique ID)
+    server_id = f"{env.cr.dbname}_{network_info['hostname']}"
+
+    # Get odoo_stage from environment variable (Odoo.sh sets this)
+    odoo_stage = os.environ.get('ODOO_STAGE', '')
+
+    return {
+        "server_id": server_id,
+        "hostname": network_info["hostname"],
+        "ip_addresses": {
+            "primary": network_info["primary"],
+            "all": network_info["all"]
+        },
+        "port": server_port,
+        "transport": "http/sse",
+        "version": "1.0.0",
+        "odoo_version": release.version,
+        "database": env.cr.dbname,
+        "capabilities": list(get_tool_registry().keys()),
+        "odoo_stage": odoo_stage,
+    }
+
+
 def register_server(env) -> bool:
     """Register server with phone-home endpoint.
 
@@ -53,9 +110,6 @@ def register_server(env) -> bool:
         bool: True if registration successful, False otherwise
     """
     try:
-        # Import tool registry to get dynamic capabilities
-        from ..tools.registry import get_tool_registry
-
         # Get configuration
         ICP = env['ir.config_parameter'].sudo()
         phone_home_url = ICP.get_param('mcp.phone_home_url', default=False)
@@ -64,39 +118,15 @@ def register_server(env) -> bool:
             _logger.info("MCP: Phone-home disabled (no URL configured)")
             return False
 
-        # Get network info
-        network_info = get_network_info()
-
-        # Get server info
-        server_port = int(ICP.get_param('mcp.server_port', default=8768))
-        odoo_version = release.version
-
-        # Get server ID (use database name + hostname as unique ID)
-        server_id = f"{env.cr.dbname}_{network_info['hostname']}"
-
-        # Build registration payload
-        payload = {
-            "server_id": server_id,
-            "hostname": network_info["hostname"],
-            "ip_addresses": {
-                "primary": network_info["primary"],
-                "all": network_info["all"]
-            },
-            "port": server_port,
-            "transport": "http/sse",
-            "version": "1.0.0",
-            "odoo_version": odoo_version,
-            "database": env.cr.dbname,
-            "capabilities": list(get_tool_registry().keys()),
-            "started_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-        }
+        # Build registration payload from shared helper
+        payload = _build_server_payload(env)
+        payload["started_at"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
         # Get retry configuration
         retry_count = int(ICP.get_param('mcp.phone_home_retry_count', default=3))
         timeout = int(ICP.get_param('mcp.phone_home_timeout', default=5))
 
         # Retry logic
-        import time
         for attempt in range(retry_count):
             try:
                 register_url = phone_home_url.rstrip('/') + '/register'
@@ -108,8 +138,8 @@ def register_server(env) -> bool:
 
                 if response.status_code in [200, 201]:
                     _logger.info(
-                        f"MCP: Successfully registered server {server_id} at "
-                        f"{network_info['primary']}:{server_port}"
+                        f"MCP: Successfully registered server {payload['server_id']} at "
+                        f"{payload['ip_addresses']['primary']}:{payload['port']}"
                     )
                     return True
                 else:
@@ -150,15 +180,13 @@ def send_heartbeat(env) -> bool:
         if not phone_home_url:
             return False
 
-        # Get network info
-        network_info = get_network_info()
-        server_id = f"{env.cr.dbname}_{network_info['hostname']}"
+        # Build enriched heartbeat payload from shared helper
+        payload = _build_server_payload(env)
 
-        payload = {
-            "server_id": server_id,
-            "status": "healthy",
-            "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-        }
+        # Add heartbeat-specific fields
+        payload["status"] = "healthy"
+        payload["timestamp"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        payload["uptime_seconds"] = time.time() - _server_start_time
 
         # Send to /heartbeat endpoint
         heartbeat_url = phone_home_url.rstrip('/') + '/heartbeat'

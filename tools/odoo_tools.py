@@ -235,7 +235,8 @@ def _service_action(service: str, action: str) -> dict:
 
 
 def _get_service_logs(service: str, lines: int) -> dict:
-    """Get service logs using journalctl."""
+    """Get service logs using journalctl, falling back to log file."""
+    # Try journalctl first
     try:
         result = subprocess.run(
             ["journalctl", "-u", service, "-n", str(lines), "--no-pager"],
@@ -244,20 +245,48 @@ def _get_service_logs(service: str, lines: int) -> dict:
             timeout=10,
         )
 
-        if result.returncode != 0:
-            raise RuntimeError(f"journalctl failed: {result.stderr}")
+        if result.returncode == 0 and result.stdout.strip():
+            log_lines = result.stdout.strip().split("\n")
+            return {
+                "service": service,
+                "source": "journalctl",
+                "log_lines": log_lines,
+                "line_count": len(log_lines),
+            }
+    except Exception:
+        pass
 
-        log_lines = result.stdout.strip().split("\n") if result.stdout.strip() else []
+    # Fallback: read from Odoo log file directly
+    log_paths = [
+        '/opt/odoo/logs/odoo.log',
+        '/var/log/odoo/odoo.log',
+        '/var/log/odoo/odoo-server.log',
+    ]
 
-        return {
-            "service": service,
-            "log_lines": log_lines,
-            "line_count": len(log_lines),
-        }
+    for log_path in log_paths:
+        if Path(log_path).exists():
+            try:
+                result = subprocess.run(
+                    ["tail", "-n", str(lines), log_path],
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                )
+                if result.returncode == 0:
+                    log_lines = result.stdout.strip().split("\n") if result.stdout.strip() else []
+                    return {
+                        "service": service,
+                        "source": log_path,
+                        "log_lines": log_lines,
+                        "line_count": len(log_lines),
+                    }
+            except Exception:
+                continue
 
-    except Exception as e:
-        _logger.error(f"Failed to get service logs: {e}")
-        raise
+    raise RuntimeError(
+        "Could not read service logs: journalctl requires systemd-journal group, "
+        "and no readable log file found"
+    )
 
 
 def read_config(env, key: Optional[str] = None) -> dict:
@@ -274,7 +303,7 @@ def read_config(env, key: Optional[str] = None) -> dict:
 
     # Get Odoo config file path
     import odoo.tools.config as odoo_config
-    config_path = odoo_config.configmanager.rcfile or '/etc/odoo/odoo.conf'
+    config_path = getattr(odoo_config, 'rcfile', None) or '/etc/odoo/odoo.conf'
 
     if not Path(config_path).exists():
         # Try alternate locations

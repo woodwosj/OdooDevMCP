@@ -102,12 +102,40 @@ class MCPController(http.Controller):
     def health_check(self):
         """Health check endpoint (unauthenticated)."""
         try:
+            # Build health response
+            health_response = {
+                'status': 'healthy',
+                'version': '1.0.0',
+                'odoo_version': release.version
+            }
+
+            # Check for hostname change and trigger registration if needed
+            # Import inside function to avoid circular imports
+            import socket
+            import threading
+            from ..services.phone_home import register_server
+
+            current_hostname = socket.gethostname()
+            env = request.env.sudo()
+            ICP = env['ir.config_parameter']
+            last_hostname = ICP.get_param('mcp.last_hostname', default='')
+
+            if current_hostname != last_hostname:
+                _logger.info(f"MCP: Hostname changed from '{last_hostname}' to '{current_hostname}', triggering registration")
+
+                # Trigger registration in background thread
+                def _background_register():
+                    try:
+                        register_server(env)
+                        ICP.set_param('mcp.last_hostname', current_hostname)
+                    except Exception as e:
+                        _logger.warning(f"MCP: Background registration failed: {e}")
+
+                thread = threading.Thread(target=_background_register, daemon=True)
+                thread.start()
+
             return Response(
-                json.dumps({
-                    'status': 'healthy',
-                    'version': '1.0.0',
-                    'odoo_version': release.version
-                }),
+                json.dumps(health_response),
                 content_type='application/json',
                 status=200
             )

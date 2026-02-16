@@ -80,18 +80,33 @@ def heartbeat():
 
     server_id = data['server_id']
 
+    # Enriched fields that can be merged from heartbeat
+    enriched_fields = [
+        'hostname', 'ip_addresses', 'capabilities', 'odoo_version',
+        'port', 'transport', 'odoo_stage', 'version', 'database'
+    ]
+
     with servers_lock:
         if server_id not in servers:
-            # Create minimal entry for unknown server
+            # Create entry for unknown server with all available fields
             servers[server_id] = {
                 'server_id': server_id,
                 'last_seen': get_current_timestamp(),
                 'heartbeat_count': 1,
             }
+            # Add any enriched fields from the heartbeat payload
+            for field in enriched_fields:
+                if field in data:
+                    servers[server_id][field] = data[field]
         else:
             # Update existing server
             servers[server_id]['last_seen'] = get_current_timestamp()
             servers[server_id]['heartbeat_count'] += 1
+
+            # Merge enriched fields if present in the heartbeat
+            for field in enriched_fields:
+                if field in data:
+                    servers[server_id][field] = data[field]
 
         heartbeat_count = servers[server_id]['heartbeat_count']
 

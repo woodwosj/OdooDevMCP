@@ -43,12 +43,13 @@ openspec archive <change-id> --yes                         # archive after deplo
 - **Tool registry**: `tools/registry.py` is the central dispatch. `get_tool_registry()` maps tool names to handler functions, `get_tool_schemas()` maps tool names to JSON schemas, `call_tool(env, name, params)` dispatches. All tool handlers receive `env` as first arg and return a dict.
 - **Security layer**: Every tool handler imports `from ..security.security import audit_log, check_rate_limit` and calls both. Rate limiting is in-memory sliding window per-database. Audit logging writes to a file.
 - **Config via ir.config_parameter**: All settings stored as `mcp.*` keys, editable in Settings UI via `mcp.config.settings` transient model.
-- **Phone-home**: `services/phone_home.py` stores a base URL in `mcp.phone_home_url` and appends `/register` or `/heartbeat` paths. Capabilities list is dynamic from `get_tool_registry().keys()`. Import of registry is inside function body to avoid circular imports.
-- **Cron**: `models/mcp_heartbeat.py` is an `AbstractModel` (no DB table) that provides `_cron_send_heartbeat()` called by an `ir.cron` record every 1 minute.
+- **Phone-home**: `services/phone_home.py` stores a base URL in `mcp.phone_home_url` and appends `/register` or `/heartbeat` paths. `_build_server_payload(env)` helper builds common payload fields (server_id, hostname, ip_addresses, port, transport, version, odoo_version, database, capabilities, odoo_stage) used by both registration and heartbeat. Capabilities list is dynamic from `get_tool_registry().keys()`. Import of registry is inside function body to avoid circular imports. Heartbeat payloads are enriched with full server info to enable receiver updates without re-registration.
+- **Hostname change detection**: `mcp.last_hostname` ICP key stores the last-known hostname. Both `/mcp/v1/health` endpoint (via background thread) and heartbeat cron check for hostname changes (comparing `socket.gethostname()` to stored value). On change, triggers `register_server()` and updates ICP. This enables automatic re-registration after Odoo.sh rebuilds or hostname changes.
+- **Cron**: `models/mcp_heartbeat.py` is an `AbstractModel` (no DB table) that provides `_cron_send_heartbeat()` called by an `ir.cron` record every 1 minute. Checks for hostname changes before sending heartbeat.
 - **MCP protocol**: Hand-rolled JSON-RPC 2.0 handler in `MCPServerHandler`, NOT the `mcp` Python SDK decorator pattern. Routes: `initialize`, `tools/list`, `tools/call`, `resources/list`, `resources/read`.
 - **Auth**: Odoo 19 native `auth='bearer'` on all endpoints except `/mcp/v1/health`. Uses Odoo API keys (`res.users.apikeys`).
 
-**Standalone receiver** (`receiver/server.py`): Flask app for catching phone-home POSTs during development. Thread-safe in-memory storage, optional ngrok tunnel. Not part of the Odoo module.
+**Standalone receiver** (`receiver/server.py`): Flask app for catching phone-home POSTs during development. Thread-safe in-memory storage, optional ngrok tunnel. Not part of the Odoo module. Heartbeat endpoint merges enriched fields from heartbeat payload into existing server records, supporting both slim (server_id/status/timestamp only) and enriched (full server info) formats.
 
 ## Adding a New Tool
 
@@ -60,9 +61,9 @@ openspec archive <change-id> --yes                         # archive after deplo
 ## Critical Constraints
 
 - **Odoo 19**: Use `auth='bearer'` and `type='jsonrpc'` (not deprecated `type='json'`). Cron XML: no `numbercall`/`doall` fields (removed in Odoo 18+).
-- **Circular imports**: `services/phone_home.py` and `models/mcp_heartbeat.py` import from `tools.registry` and `services.phone_home` respectively inside function/method bodies, not at module level.
+- **Circular imports**: `services/phone_home.py` and `models/mcp_heartbeat.py` import from `tools.registry` and `services.phone_home` respectively inside function/method bodies, not at module level. `controllers/mcp_endpoint.py` imports `socket`, `threading`, and `register_server` inside `health_check()` method.
 - **Odoo.sh compatible**: No systemd, no root shell, no stdio transport. HTTP only.
-- **Config param namespace**: Always `mcp.*` prefix.
+- **Config param namespace**: Always `mcp.*` prefix. Includes `mcp.last_hostname` for hostname change detection.
 - **Access control**: Only `base.group_system` (admin) has access to `mcp.config.settings`.
 
 ## VPS Deployment
