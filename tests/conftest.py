@@ -87,8 +87,25 @@ _odoo_release.version = "19.0"
 _odoo_tools_config.configmanager = MagicMock()
 _odoo_tools_config.configmanager.rcfile = "/etc/odoo/odoo.conf"
 
+# Wire up odoo-level attributes used by controllers with auth='none'
+_odoo.SUPERUSER_ID = 1
+
+# Mock odoo.modules.registry.Registry for health endpoint hostname detection
+_odoo_modules = types.ModuleType("odoo.modules")
+_odoo_modules_registry = types.ModuleType("odoo.modules.registry")
+_odoo_modules_registry.Registry = MagicMock()
+_odoo_modules.registry = _odoo_modules_registry
+
+# Also mock odoo.orm.registry (where it actually lives in Odoo 19)
+_odoo_orm = types.ModuleType("odoo.orm")
+_odoo_orm_registry = types.ModuleType("odoo.orm.registry")
+_odoo_orm_registry.Registry = _odoo_modules_registry.Registry
+_odoo_orm.registry = _odoo_orm_registry
+
 # Attach sub-modules to odoo
 _odoo.models = _odoo_models
+_odoo.modules = _odoo_modules
+_odoo.orm = _odoo_orm
 _odoo.fields = _odoo_fields
 _odoo.api = _odoo_api
 _odoo.http = _odoo_http
@@ -113,6 +130,10 @@ sys.modules.setdefault("odoo.release", _odoo_release)
 sys.modules.setdefault("odoo.tools", _odoo_tools)
 sys.modules.setdefault("odoo.tools.config", _odoo_tools_config)
 sys.modules.setdefault("odoo.exceptions", _odoo_exceptions)
+sys.modules.setdefault("odoo.modules", _odoo_modules)
+sys.modules.setdefault("odoo.modules.registry", _odoo_modules_registry)
+sys.modules.setdefault("odoo.orm", _odoo_orm)
+sys.modules.setdefault("odoo.orm.registry", _odoo_orm_registry)
 sys.modules.setdefault("werkzeug", _werkzeug)
 sys.modules.setdefault("werkzeug.exceptions", _werkzeug_exceptions)
 

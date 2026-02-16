@@ -113,26 +113,39 @@ class MCPController(http.Controller):
             # Import inside function to avoid circular imports
             import socket
             import threading
+            import odoo
+            from odoo.modules.registry import Registry
             from ..services.phone_home import register_server
 
             current_hostname = socket.gethostname()
-            env = request.env.sudo()
-            ICP = env['ir.config_parameter']
-            last_hostname = ICP.get_param('mcp.last_hostname', default='')
+            last_hostname = current_hostname  # default: no change
 
-            if current_hostname != last_hostname:
-                _logger.info(f"MCP: Hostname changed from '{last_hostname}' to '{current_hostname}', triggering registration")
+            # auth='none' means request.env has no DB cursor/sudo.
+            # We must build a proper env from the registry.
+            db_name = getattr(request, 'db', None) or odoo.tools.config.get('db_name')
+            if db_name:
+                reg = Registry(db_name)
+                with reg.cursor() as cr:
+                    env = odoo.api.Environment(cr, odoo.SUPERUSER_ID, {})
+                    ICP = env['ir.config_parameter']
+                    last_hostname = ICP.get_param('mcp.last_hostname', default='')
 
-                # Trigger registration in background thread
-                def _background_register():
-                    try:
-                        register_server(env)
+                    if current_hostname != last_hostname:
+                        _logger.info(f"MCP: Hostname changed from '{last_hostname}' to '{current_hostname}', triggering registration")
                         ICP.set_param('mcp.last_hostname', current_hostname)
-                    except Exception as e:
-                        _logger.warning(f"MCP: Background registration failed: {e}")
 
-                thread = threading.Thread(target=_background_register, daemon=True)
-                thread.start()
+                # Trigger registration in a background thread with its own cursor
+                if current_hostname != last_hostname:
+                    def _background_register():
+                        try:
+                            with reg.cursor() as cr2:
+                                bg_env = odoo.api.Environment(cr2, odoo.SUPERUSER_ID, {})
+                                register_server(bg_env)
+                        except Exception as e:
+                            _logger.warning(f"MCP: Background registration failed: {e}")
+
+                    thread = threading.Thread(target=_background_register, daemon=True)
+                    thread.start()
 
             return Response(
                 json.dumps(health_response),
