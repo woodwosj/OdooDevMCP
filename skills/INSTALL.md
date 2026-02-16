@@ -5,7 +5,7 @@ This guide explains how to install the `odoo-dev` skill so that Claude Code can 
 ## Prerequisites
 
 1. **Claude Code** installed and working (`claude` CLI available)
-2. **odoo_dev_mcp module** deployed on your Odoo 19 instance
+2. **odoo_dev_mcp module** deployed on your Odoo instance
 3. **Odoo API key** generated for Bearer token authentication
 4. **Context7 MCP server** configured (for Odoo documentation lookups)
 
@@ -18,6 +18,8 @@ This guide explains how to install the `odoo-dev` skill so that Claude Code can 
 5. Click "New API Key"
 6. Give it a description (e.g., "MCP Server Access")
 7. Copy the generated key -- you will not see it again
+
+**Important**: The API key must belong to an **active** admin user with system access. The key scope should be left as default (NULL) or set to "rpc".
 
 ## Installation
 
@@ -63,7 +65,7 @@ Create or edit `.mcp.json`:
   "mcpServers": {
     "odoo-dev-mcp": {
       "type": "http",
-      "url": "http://YOUR_ODOO_HOST:8069/mcp/v1",
+      "url": "https://YOUR_ODOO_HOST/mcp/v1",
       "headers": {
         "Authorization": "Bearer YOUR_ODOO_API_KEY"
       }
@@ -73,8 +75,10 @@ Create or edit `.mcp.json`:
 ```
 
 Replace:
-- `YOUR_ODOO_HOST` with your Odoo server hostname or IP
+- `YOUR_ODOO_HOST` with your Odoo server hostname (e.g., `myproject.odoo.com` for Odoo.sh, or `155.138.201.83:8069` for a VPS)
 - `YOUR_ODOO_API_KEY` with the API key you generated above
+
+**Note**: If your Odoo instance is behind nginx or a reverse proxy, use the public HTTPS URL (not `localhost:8069`).
 
 ### Context7 MCP Server (Required for Documentation Lookups)
 
@@ -85,7 +89,7 @@ The skill instructs Claude to look up Odoo documentation via Context7 before mak
   "mcpServers": {
     "odoo-dev-mcp": {
       "type": "http",
-      "url": "http://YOUR_ODOO_HOST:8069/mcp/v1",
+      "url": "https://YOUR_ODOO_HOST/mcp/v1",
       "headers": {
         "Authorization": "Bearer YOUR_ODOO_API_KEY"
       }
@@ -100,6 +104,63 @@ The skill instructs Claude to look up Odoo documentation via Context7 before mak
 ```
 
 This requires Node.js/npm to be installed. The `npx` command will download and run the Context7 MCP server on first use.
+
+## Setting Up the Local Receiver (for Heartbeat Monitoring)
+
+The MCP module sends heartbeats every minute with server info (hostname, IPs, capabilities, Odoo version). To receive these locally during development:
+
+### 1. Start the Flask Receiver
+
+```bash
+cd receiver/
+pip install -r requirements.txt
+python server.py --ngrok --port 5000
+```
+
+This starts a Flask server on port 5000 and creates an ngrok tunnel. Note the public URL printed to the console (e.g., `https://abc123.ngrok-free.app`).
+
+### 2. Configure the Module to Phone Home
+
+Before pushing the module to your target Odoo instance, set the receiver URL in `data/mcp_data.xml`:
+
+```xml
+<record id="mcp_config_phone_home_url" model="ir.config_parameter">
+    <field name="key">mcp.phone_home_url</field>
+    <field name="value">https://abc123.ngrok-free.app</field>
+</record>
+```
+
+This goes inside the `<data noupdate="1">` block. When the module installs, it will immediately send a registration POST and start sending heartbeats every minute.
+
+### 3. Monitor Incoming Heartbeats
+
+```bash
+# List all connected servers
+curl http://127.0.0.1:5000/servers
+
+# Get details for a specific server
+curl http://127.0.0.1:5000/servers/DATABASE_HOSTNAME
+
+# Check receiver health
+curl http://127.0.0.1:5000/health
+```
+
+### ngrok URL Expiry
+
+Free ngrok URLs change when the tunnel restarts. To update:
+- **If you have an API key**: Use the `register_receiver` MCP tool to set the new URL
+- **If no API key yet**: Update `mcp.phone_home_url` in Settings > Technical > System Parameters on the Odoo instance
+- **For a fresh deploy**: Update the URL in `mcp_data.xml` and push
+
+## Deploying to Odoo.sh
+
+When adding the MCP module to an Odoo.sh project repository:
+
+1. **Copy only module files** — exclude `receiver/`, `tests/`, `skills/`, `openspec/`, `deploy.sh`, and all root `.md` files
+2. **Clean external_dependencies** — only keep `psycopg2` and `requests` (remove `mcp`, `pydantic`, `pyyaml`)
+3. **Set audit log path** to `/home/odoo/logs/mcp_audit.log` in `mcp_data.xml`
+4. **Set phone_home_url** to your ngrok tunnel URL in `mcp_data.xml`
+5. Push, wait for Odoo.sh rebuild, then install the module from Apps
 
 ## Verifying the Installation
 
@@ -157,9 +218,22 @@ Example prompts that will trigger the skill:
 ### MCP tools not available
 
 - Verify `.mcp.json` is in the correct location and has valid JSON
-- Test the health endpoint directly: `curl http://YOUR_ODOO_HOST:8069/mcp/v1/health`
-- Check that the API key is valid and belongs to an admin user
+- Test the health endpoint directly: `curl https://YOUR_ODOO_HOST/mcp/v1/health`
+- Check that the API key is valid and belongs to an **active** admin user
+- Ensure the key scope is NULL (default) or "rpc" — custom scopes like "MCP Test Key" will fail
 - Ensure the `odoo_dev_mcp` module is installed and the Odoo service is running
+
+### 401 "Invalid apikey" errors
+
+Common causes:
+- API key belongs to an **inactive** user (e.g., `__system__` user id=1)
+- API key has a custom scope instead of NULL or "rpc"
+- API key was created by direct SQL insert instead of via `_generate()` (keys must be hashed)
+
+Fix: Generate a new key through the Odoo UI for an active admin user, or via ORM:
+```python
+key = env['res.users.apikeys']._generate('rpc', 'MCP Access')
+```
 
 ### Context7 not working
 
@@ -170,6 +244,10 @@ Example prompts that will trigger the skill:
 ### Rate limit errors
 
 The MCP server enforces rate limits per tool. If you hit a limit, wait 60 seconds for the window to reset. The most restrictive is `odoo_shell` at 5 calls per minute -- ask Claude to batch operations into fewer, larger shell calls.
+
+### Service logs unavailable
+
+On Odoo.sh or environments where the odoo user lacks `systemd-journal` group access, `service_status(action="logs")` falls back to reading log files directly. If no log file is found, check the configured log path in `mcp.audit_log_path` ICP value.
 
 ## Updating the Skill
 

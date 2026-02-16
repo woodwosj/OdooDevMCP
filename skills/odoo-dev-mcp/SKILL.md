@@ -1,7 +1,7 @@
 ---
 name: "odoo-dev"
 description: "Triggered when users ask about Odoo development, debugging, deploying, or managing Odoo modules and instances. Handles tasks like writing Odoo models, views, controllers, security rules, ORM code, module installation, database inspection, server management, and troubleshooting Odoo errors. Use this skill for any work involving an Odoo instance connected via the odoo-dev-mcp server."
-version: "1.0.0"
+version: "1.1.0"
 ---
 
 # Odoo Development with MCP Server
@@ -49,6 +49,109 @@ Call `list_modules` or `read_config` as a quick smoke test that authenticated to
 ```
 register_receiver(receiver_url="https://your-receiver.ngrok.io")
 ```
+
+## Deploying to a New Odoo.sh Environment
+
+When deploying the MCP module to a new Odoo.sh instance (or any remote Odoo), follow this process to ensure heartbeats reach your local development machine automatically.
+
+### Step 1: Start the Local Receiver
+
+The receiver is a lightweight Flask server that catches registration and heartbeat POSTs from remote Odoo instances.
+
+```bash
+cd receiver/
+pip install -r requirements.txt
+python server.py --ngrok --port 5000
+```
+
+This starts:
+- Flask receiver on `http://127.0.0.1:5000`
+- ngrok tunnel providing a public HTTPS URL (printed to console)
+
+Note the ngrok URL (e.g., `https://abc123.ngrok-free.app`).
+
+### Step 2: Set the Receiver URL in Module Data
+
+Before pushing the module to the target repo, set `mcp.phone_home_url` in `data/mcp_data.xml`:
+
+```xml
+<record id="mcp_config_phone_home_url" model="ir.config_parameter">
+    <field name="key">mcp.phone_home_url</field>
+    <field name="value">https://abc123.ngrok-free.app</field>
+</record>
+```
+
+This goes inside the `<data noupdate="1">` block. On module install, Odoo writes this ICP value, and the `post_init_hook` immediately sends a registration POST to your receiver.
+
+### Step 3: Push Only Module Files
+
+When adding the module to a client repo (e.g., an Odoo.sh project), include ONLY the Odoo module files:
+
+```
+odoo_dev_mcp/
+  __init__.py
+  __manifest__.py
+  controllers/
+  data/
+  models/
+  security/
+  services/
+  static/description/icon.png
+  tools/
+  views/
+```
+
+**Exclude**: `receiver/`, `tests/`, `skills/`, `openspec/`, `deploy.sh`, all root-level `.md` files, `__pycache__/`, `.git/`
+
+### Step 4: Clean External Dependencies
+
+The manifest's `external_dependencies` must only list packages available on Odoo.sh. Remove any that aren't actually imported:
+
+```python
+'external_dependencies': {
+    'python': [
+        'psycopg2',
+        'requests',
+    ],
+},
+```
+
+Do NOT include `mcp`, `pydantic`, or `pyyaml` — they are not used by the module runtime and will cause Odoo.sh builds to fail.
+
+### Step 5: Adjust Paths for Odoo.sh
+
+Odoo.sh uses different filesystem paths than a VPS:
+- Audit log path: `/home/odoo/logs/mcp_audit.log` (not `/var/log/odoo/`)
+- Module path: managed by Odoo.sh (no `/opt/odoo/custom-addons/`)
+- No systemd — `service_status` log fallback reads files directly
+
+### Step 6: Install and Verify
+
+After Odoo.sh rebuilds from your push:
+1. Go to **Apps > Update Apps List**
+2. Search for **Odoo Dev MCP Server** and install
+3. The `post_init_hook` fires → sends registration to your local receiver
+4. Cron fires every minute → sends enriched heartbeats
+
+Monitor locally:
+```bash
+curl http://127.0.0.1:5000/servers
+```
+
+### What Happens Automatically
+
+Once installed with a receiver URL configured:
+- **On install**: `post_init_hook` sends full server registration (hostname, IPs, capabilities, Odoo version, database name)
+- **Every minute**: Cron sends enriched heartbeat (all server info + status + uptime)
+- **On Odoo.sh rebuild**: Health endpoint detects hostname change → triggers re-registration → cron sends updated heartbeat within 1 minute
+- **No API key needed** for heartbeats — they use the server's own ORM environment
+
+### ngrok URL Expiry
+
+Free ngrok URLs change on restart. When your tunnel restarts:
+- Either update `mcp.phone_home_url` via Settings > Technical > System Parameters on the Odoo instance
+- Or push a new commit with the updated URL in `mcp_data.xml` (requires module upgrade since `noupdate="1"`)
+- Or use `register_receiver` tool if you have an API key configured
 
 ## Available MCP Tools Reference
 
@@ -186,6 +289,9 @@ Parameters:
   log_lines: integer - Lines to return for logs action (default: 50, max: 1000)
 
 Returns: { service, active, status, pid, memory_mb, uptime, description } or log data
+
+Note: On Odoo.sh, systemctl is unavailable. The logs action falls back to reading
+log files directly from /home/odoo/logs/ or /var/log/odoo/.
 ```
 
 ### Utility Tools
@@ -399,6 +505,7 @@ When creating or modifying Odoo modules, verify each of these:
 - [ ] `data` lists all XML/CSV files in load order (security first, then views, then data)
 - [ ] `license` is specified (commonly "LGPL-3")
 - [ ] `application` is True only for top-level apps, not libraries
+- [ ] `external_dependencies` only lists packages actually imported AND available on the target platform
 
 ## Odoo 19 Specific Notes
 
@@ -406,7 +513,11 @@ This server runs Odoo 19. Key differences from older versions:
 
 - Use `auth='bearer'` for API authentication (not custom token schemes)
 - Controller `type='jsonrpc'` replaces deprecated `type='json'`
+- Use `type='http'` when you need full control of the JSON response (avoids double-wrapping)
 - Cron XML records do not support `numbercall` or `doall` fields (removed in Odoo 18+)
+- `odoo.tools.config` IS the configmanager instance directly — access `.rcfile`, `.get('db_name')` etc. on it (NOT `odoo.tools.config.configmanager`)
+- For `auth='none'` endpoints needing ORM access, use `from odoo.modules.registry import Registry` and build an env manually — `request.env.sudo()` does NOT work without auth
+- `odoo.registry()` does NOT exist in Odoo 19 — use `Registry(db_name)` instead
 - The `web` module is always installed; assets bundle patterns may differ from Odoo 16/17
 - Check Context7 docs for any API changes before assuming Odoo 16/17 patterns still apply
 
@@ -473,3 +584,14 @@ When a tool call fails:
 4. For file errors, verify the path exists using `execute_command(command="ls -la /path/to/check")`
 5. For service errors, check logs: `service_status(service="odoo", action="logs")`
 6. If rate-limited, wait and retry after the window resets (60 seconds)
+
+## Known Platform Differences
+
+| Aspect | VPS / Self-hosted | Odoo.sh |
+|--------|-------------------|---------|
+| Audit log path | `/opt/odoo/logs/mcp_audit.log` | `/home/odoo/logs/mcp_audit.log` |
+| Service management | systemctl available | No systemd — logs via file fallback |
+| `ODOO_STAGE` env var | Not set (empty string) | `dev`, `staging`, or `production` |
+| Hostname stability | Stable | Changes on every rebuild |
+| Module path | `/opt/odoo/custom-addons/` | Managed by Odoo.sh git deploy |
+| journalctl | May need `systemd-journal` group | Not available |
