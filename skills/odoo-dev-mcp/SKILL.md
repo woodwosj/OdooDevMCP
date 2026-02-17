@@ -1,6 +1,6 @@
 ---
 name: "odoo-dev"
-description: "Triggered when users ask about Odoo development, debugging, deploying, or managing Odoo modules and instances. Handles tasks like writing Odoo models, views, controllers, security rules, ORM code, module installation, database inspection, server management, and troubleshooting Odoo errors. Use this skill for any work involving an Odoo instance connected via the odoo-dev-mcp server."
+description: "Triggered when users ask about Odoo development, debugging, deploying, or managing Odoo modules and instances. Handles tasks like writing Odoo models, views, controllers, security rules, ORM code, module installation, database inspection, server management, and troubleshooting Odoo errors. Also use this skill when you need the current Odoo.sh hostname or pod ID after a rebuild — the heartbeat receiver tracks it automatically. Use this skill for any work involving an Odoo instance connected via the odoo-dev-mcp server."
 version: "1.1.0"
 ---
 
@@ -592,6 +592,68 @@ When a tool call fails:
 | Audit log path | `/opt/odoo/logs/mcp_audit.log` | `/home/odoo/logs/mcp_audit.log` |
 | Service management | systemctl available | No systemd — logs via file fallback |
 | `ODOO_STAGE` env var | Not set (empty string) | `dev`, `staging`, or `production` |
-| Hostname stability | Stable | Changes on every rebuild |
+| Hostname stability | Stable | Changes on every rebuild (heartbeat auto-reports new hostname) |
 | Module path | `/opt/odoo/custom-addons/` | Managed by Odoo.sh git deploy |
 | journalctl | May need `systemd-journal` group | Not available |
+
+## Tracking Odoo.sh Hostname After Rebuilds
+
+Odoo.sh assigns a new pod ID (and SSH hostname) on every rebuild. The MCP module solves this automatically:
+
+1. **Heartbeats report the current hostname** — the receiver always has the latest pod ID
+2. **Health endpoint detects hostname changes** — if the hostname differs from the last known value stored in `mcp.last_hostname`, it triggers a re-registration POST to the receiver
+3. **No manual SSH lookup needed** — query your local receiver instead:
+   ```bash
+   curl -s http://127.0.0.1:5000/servers | python3 -m json.tool
+   ```
+   The `hostname` and `server_id` fields contain the current pod identifier.
+
+**Use this whenever you need the new SSH hostname after a rebuild** rather than manually checking Odoo.sh or probing `known_hosts`. The receiver is the source of truth for which pods are alive and reachable.
+
+### Bootstrap via pre_init_hook Piggyback
+
+On Odoo.sh staging/dev branches, new modules are not auto-discovered even with `auto_install: True`. The `odoo_dev_mcp` module bootstraps itself by piggybacking on the `pre_init_hook` of an **already-installed** module in the same repo.
+
+**How it works:**
+1. Pick any module that is already installed on the target Odoo.sh environment
+2. Add a `pre_init_hook` to that module's `__init__.py` that discovers and installs `odoo_dev_mcp`
+3. Reference the hook in that module's `__manifest__.py`
+4. The hook is idempotent — once `odoo_dev_mcp` is installed, it no-ops on future upgrades
+
+**CRITICAL — The hook only fires when the host module is upgraded.** Odoo.sh only upgrades a module when its version changes. This means:
+
+> **Every `git push` to the branch MUST also bump the version of the piggyback host module.** If you only bump your own module's version and push, the host module won't upgrade, the hook won't fire, `odoo_dev_mcp` won't install, and heartbeats won't resume on the new pod.
+
+**Before every push, always:**
+1. Find the piggyback host module: `grep -r 'pre_init_hook.*_pre_init_install_mcp' --include='*.py' .`
+2. Bump its `__manifest__.py` version (even a patch increment is enough)
+3. Commit both your changes AND the host module version bump together
+
+**Finding the host module in any project:**
+```bash
+# Find which module carries the bootstrap hook
+grep -rl '_pre_init_install_mcp' --include='__manifest__.py' .
+grep -rl '_pre_init_install_mcp' --include='__init__.py' .
+```
+
+Example hook in the host module's `__init__.py`:
+```python
+def _pre_init_install_mcp(cr):
+    import odoo
+    from odoo.modules.registry import Registry
+    reg = Registry(cr.dbname)
+    with reg.cursor() as new_cr:
+        env = odoo.api.Environment(new_cr, odoo.SUPERUSER_ID, {})
+        if env['ir.module.module'].search([('name', '=', 'odoo_dev_mcp'), ('state', '=', 'installed')]):
+            return
+        env['ir.module.module'].update_list()
+        mod = env['ir.module.module'].search([('name', '=', 'odoo_dev_mcp'), ('state', '=', 'uninstalled')])
+        if mod:
+            mod.button_immediate_install()
+            new_cr.commit()
+```
+
+Reference in the host module's `__manifest__.py`:
+```python
+'pre_init_hook': '_pre_init_install_mcp',
+```
